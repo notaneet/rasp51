@@ -27,7 +27,7 @@ func main() {
 
 	flag.StringVar(&output, "output", "data.out", "Файл, куда будет записываться результат")
 	flag.StringVar(&pluginName, "plugin", "МАГУ", "Требуемое учебное учреждение")
-	flag.StringVar(&converterName, "converter", "", "Тип выходных данных")
+	flag.StringVar(&converterName, "converter", "pjson", "Тип выходных данных")
 
 	flag.Parse()
 

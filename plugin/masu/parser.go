@@ -38,6 +38,9 @@ const dayWidth = 2
 // Если что-то не указано
 const emptyField = "Не указан"
 
+var crapyActivityHackRE = regexp.MustCompile("^с \\d{2}:\\d{2}$")
+var crapyActivityHack2RE = regexp.MustCompile("^\\*+$")
+
 // Спарсить xlsx файл
 func (p *_MASUMurmanskPlugin) parseWB(wb *xlsx.File, faculty string) error {
 	for _, sh := range wb.Sheets {
@@ -47,7 +50,7 @@ func (p *_MASUMurmanskPlugin) parseWB(wb *xlsx.File, faculty string) error {
 		}
 
 		group := currentGroup{
-			groupName: name,
+			groupNames: name,
 			faculty:   faculty,
 			sh:        sh,
 		}
@@ -69,8 +72,10 @@ func (p *_MASUMurmanskPlugin) parseWB(wb *xlsx.File, faculty string) error {
 // Спарсить лист в xlsx файле (учебную группу)
 func (p *_MASUMurmanskPlugin) parseSH(group currentGroup) (error error, days map[time.Time][]model.Timetable) {
 	//groupName не проходит
-	if !p.config.GroupMatcher.Match(group.groupName) {
-		return nil, days
+	for _, groupName := range group.groupNames {
+		if !p.config.GroupMatcher.Match(groupName) {
+			return nil, days
+		}
 	}
 
 	for column := startColumn - 1; column < group.sh.MaxCol; column += dayWidth {
@@ -109,7 +114,7 @@ func (p *_MASUMurmanskPlugin) parseSH(group currentGroup) (error error, days map
 var subgroupSepartor = regexp.MustCompile("//")
 
 //activity, где время не нужно
-var timeIsUselessRE = regexp.MustCompile("(?i)(день самостоятельной|праздничный день|преддипломная практика|выходной|\\d{1,2}[.:]\\d{2})")
+var timeIsUselessRE = regexp.MustCompile("(?i)(день самостоятельной|день самоподготовки|праздничный день|преддипломная практика|выходной|классный час|\\d{1,2}[.:]\\d{2})")
 
 //Есть ли время в строке
 var timeContainerRE = regexp.MustCompile("(?i)(\\d{1,2}[.:]\\d{2})")
@@ -215,7 +220,7 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 				}
 
 				// Если это занятие, то
-				if isLecture(firstSubLine) && len(secondSubLine) > 0 {
+				if isLecture(firstSubLine, secondLine) && len(secondSubLine) > 0 {
 					// Разобъем вторую строку по /
 					spliced := splitLine(secondSubLine)
 
@@ -233,6 +238,11 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 						}
 
 						if !p.config.LecturerMatcher.Match(lecturer) || !p.config.CampusMatcher.Match(campus) {
+							continue
+						}
+
+						//TODO: Факинг колледж
+						if campus == "*" || firstSubLine == "*" || firstSubLine	== "" {
 							continue
 						}
 
@@ -262,6 +272,12 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 					}
 				} else { // Если не занятие (а может и занятие)
 					// Если цель дня уже есть, добавим разделитель
+
+					// TODO: Нахуй колледж пишет со сколько пара? Или если мы не вышка, мы не догадаемся посмотреть направо?
+					if crapyActivityHackRE.MatchString(firstSubLine) || crapyActivityHackRE.MatchString(secondSubLine) ||
+						crapyActivityHack2RE.MatchString(firstSubLine) || crapyActivityHack2RE.MatchString(secondSubLine) {
+						continue
+					}
 
 					if activity != "" {
 						activity += " "
@@ -310,7 +326,7 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 	// Запишем в Calendar[date] спарсеный с горечью и слезами день
 	return nil, &model.Timetable{
 		Institution: p.GetInstitution(),
-		GroupName:   group.groupName,
+		GroupNames:  group.groupNames,
 		Faculty:     group.faculty,
 		Date:        date,
 		Activity:    activity,
@@ -347,8 +363,9 @@ var lectureRE = regexp.MustCompile("(?i)(лк|пр|лб)?(([, \\\\/|+]+)?(лк|�
 var lectureBypassRE = regexp.MustCompile("(?i)(мдк|консультация|зач[её]т|математ|пересдача|экз|практи|психолог|социолог|тест|есстество|семьеведе|истори|защита|курсов|общество|иностранный|философии|ректорский|основы безопасности|экология|информатика|русский язык|литература|патриотическое|физическая|география|страховое|экономика|итоговая)")
 
 // Занятие ли это
-func isLecture(line string) bool {
-	return lectureRE.MatchString(line) || lectureBypassRE.MatchString(line)
+func isLecture(firstLine, secondLine string) bool {
+	return lectureRE.MatchString(firstLine) || lectureBypassRE.MatchString(secondLine) ||
+		campusName(secondLine) != emptyField
 }
 
 // Нужно разбить последнюю строчку иногда по / (п/г и ссылки не подходят)
@@ -362,6 +379,17 @@ func splitLine(line string) (spliced []string) {
 			spliced = append(spliced, tmp)
 		}
 	}
+	// Колледж...
+	if len(spliced) == 1 && lecturerNameCollegeRE.MatchString(line) {
+		spliced = []string{}
+		//TODO: Либо избавиться от костыля, либо слезно умолять раздел расписания вернуть все как было
+		for _, tmp := range strings.SplitN(line, ",", 2) {
+			tmp = strings.Trim(tmp, " /")
+			if len(tmp) > 0 {
+				spliced = append(spliced, tmp)
+			}
+		}
+	}
 	return spliced
 }
 
@@ -372,8 +400,11 @@ func splitLine(line string) (spliced []string) {
 // Например: 1БПМИ-ПТ, 4БЛВ-ПРВ(403), 4БПО-НО-(з), 2СЛД(д)
 var cleanRE = regexp.MustCompile("(?i)([0-9]-?[-а-яё0-9]+(\\+Д)? *(\\([0-9дз+]+\\))?)")
 
-func cleanName(name string) string {
-	return strings.TrimSpace(cleanRE.FindString(name))
+func cleanName(group string) (ret []string) {
+	for _, name := range strings.Split(group, ",") {
+		ret = append(ret, strings.TrimSpace(cleanRE.FindString(name)))
+	}
+	return ret
 }
 
 // Имя преподавателя в общем формате (В.Н. Морозов)
@@ -461,7 +492,7 @@ func getExcept(groups []string, i int) (sb string) {
 
 // Модель для общения
 type currentGroup struct {
-	groupName string
+	groupNames []string
 	faculty   string
 	sh        *xlsx.Sheet
 }
