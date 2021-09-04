@@ -53,16 +53,14 @@ func (p PGSQLConverter) Write(node model.TimetableNode, out string) error {
 
 	for _, days := range node {
 		for _, day := range days {
-			for _, groupName := range day.GroupNames {
-				var timetableId uint
-				scan := insertTimetable.QueryRowx(day.Institution, day.Date, groupName, day.Faculty, day.Activity)
-				if err = scan.Scan(&timetableId); err != nil {
-					continue
-				}
+			var timetableId uint
+			scan := insertTimetable.QueryRowx(day.Institution, day.Date, day.GroupName, day.Faculty, day.Activity)
+			if err = scan.Scan(&timetableId); err != nil {
+				continue
+			}
 
-				for _, class := range day.Classes {
-					insertClass.MustExec(timetableId, class.Title, class.StartTime, class.EndTime, class.Lecturer, class.Campus)
-				}
+			for _, class := range day.Classes {
+				insertClass.MustExec(timetableId, class.Title, class.StartTime, class.EndTime, class.Lecturer, class.Campus)
 			}
 
 		}

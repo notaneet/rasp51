@@ -51,8 +51,8 @@ func (p *_MASUMurmanskPlugin) parseWB(wb *xlsx.File, faculty string) error {
 
 		group := currentGroup{
 			groupNames: name,
-			faculty:   faculty,
-			sh:        sh,
+			faculty:    faculty,
+			sh:         sh,
 		}
 
 		err, days := p.parseSH(group)
@@ -98,20 +98,36 @@ func (p *_MASUMurmanskPlugin) parseSH(group currentGroup) (error error, days map
 				return err, nil
 			}
 
-			if t != nil {
-				if days == nil {
-					days = map[time.Time][]model.Timetable{}
-				}
+			if days == nil {
+				days = map[time.Time][]model.Timetable{}
+			}
 
-				days[date] = append(days[date], *t)
+			for _, timetable := range t {
+				if timetable != nil {
+					days[date] = append(days[date], *timetable)
+				}
 			}
 		}
 	}
 	return nil, days
 }
 
+//Почему в стд нет сплита с оффсетом, либо хотя-бы регулярок последней версии
+func splitExcept(str string, separator, excepting *regexp.Regexp) (ret []string) {
+	cleaned := excepting.ReplaceAllString(str, "<ugly_hack>")
+	for _, s := range separator.Split(cleaned, -1) {
+		ret = append(ret, strings.Replace(s, "<ugly_hack>", excepting.FindString(str), -1))
+	}
+	return
+}
+
 //Иногда у разных подгрупп разные пары в одно и тоже время (разделяется обычно с помощью //)
-var subgroupSepartor = regexp.MustCompile("//")
+var subgroupSepartor = regexp.MustCompile("(?i)//")
+
+//^ выше
+func splitOnSubgroups(str string) []string {
+	return splitExcept(str, subgroupSepartor, externalLinkRE)
+}
 
 //activity, где время не нужно
 var timeIsUselessRE = regexp.MustCompile("(?i)(день самостоятельной|день самоподготовки|праздничный день|преддипломная практика|выходной|классный час|\\d{1,2}[.:]\\d{2})")
@@ -122,11 +138,13 @@ var timeContainerRE = regexp.MustCompile("(?i)(\\d{1,2}[.:]\\d{2})")
 // Спарсить какой-то день
 // column - первый слева столбик (там, где день недели)
 // row - первая с верху строчка (там, где день недели и дата)
-func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date time.Time) (error, *model.Timetable) {
+func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date time.Time) (error error, ret []*model.Timetable) {
 	// Если передан интервал и дата за ее пределами, то ничего не возвращаем
 	if (p.config.StartTime != nil && date.Before(*p.config.StartTime)) || (p.config.EndTime != nil && date.After(*p.config.EndTime)) {
 		return nil, nil
 	}
+	// Костыль для колледжа...
+	groups := group.groupNames
 
 	// Занятия
 	classes := make([]model.Class, 0)
@@ -185,33 +203,13 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 		}
 
 		// Разобъем строки по под.группам и пройдемся по ним
-		firstLineSplited := subgroupSepartor.Split(firstLine, -1)
-		secondLineSplited := subgroupSepartor.Split(secondLine, -1)
+		firstLineSplited := splitOnSubgroups(firstLine)
+		secondLineSplited := splitOnSubgroups(secondLine)
 		for line := 0; line < len(firstLineSplited); line++ {
-			// Получим грубо говоря "нормальные" firstLine и secondLine
-			firstSubLineRaw := strings.TrimSpace(utils.GetOrString(firstLineSplited, line, ""))
-			secondSubLineRaw := strings.TrimSpace(utils.GetOrString(secondLineSplited, line, ""))
-			if secondSubLineRaw == "" && line > 0 {
-				secondSubLineRaw = strings.TrimSpace(utils.GetOrString(secondLineSplited, line-1, ""))
-			}
-
 			// Незаконченное занятие (которое сейчас и парсится)
 			var lastClassEntry *model.Class = nil
 
-			fSubgroups := splitSubgroups(firstSubLineRaw)
-			sSubgroups := splitSubgroups(secondSubLineRaw)
-			subgroups := make([][]string, (int)(math.Min(float64(len(fSubgroups)), float64(len(sSubgroups)))))
-			for sgI := 0; sgI < len(subgroups); sgI++ {
-				subgroups[sgI] = make([]string, 2)
-
-				subgroups[sgI][0] = strings.TrimSpace(utils.GetOrString(fSubgroups, sgI, ""))
-				subgroups[sgI][1] = strings.TrimSpace(utils.GetOrString(sSubgroups, sgI, ""))
-			}
-
-			if len(subgroups) > 1 {
-				fmt.Println(subgroups)
-			}
-
+			subgroups := resolveSubgroups(firstLineSplited, secondLineSplited, line)
 			// Пройдёмся по всем под-группам
 			for _, lines := range subgroups {
 				firstSubLine, secondSubLine := lines[0], lines[1]
@@ -242,7 +240,7 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 						}
 
 						//TODO: Факинг колледж
-						if campus == "*" || firstSubLine == "*" || firstSubLine	== "" {
+						if campus == "*" || firstSubLine == "*" || firstSubLine == "" {
 							continue
 						}
 
@@ -301,8 +299,8 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 				}
 			}
 
-			// Очистим занятие от повторяющихся пробелов
 			if lastClassEntry != nil {
+				// Очистим занятие от повторяющихся пробелов
 				lastClassEntry.Title = utils.RemoveSpaces(lastClassEntry.Title)
 
 				// Дополним занятие в список занятий
@@ -324,32 +322,59 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 	}
 
 	// Запишем в Calendar[date] спарсеный с горечью и слезами день
-	return nil, &model.Timetable{
-		Institution: p.GetInstitution(),
-		GroupNames:  group.groupNames,
-		Faculty:     group.faculty,
-		Date:        date,
-		Activity:    activity,
-		Classes:     classes,
+	for _, name := range groups {
+		classesHack := classes
+		// Рубрика еженедельного костыля в фонд для колледжа
+		if group.faculty == "Колледж" {
+			classesHack = []model.Class{}
+			for _, class := range classes {
+				if !strings.Contains(class.Title, "(9)") && !strings.Contains(class.Title, "(11)") && //Лебедь, рак и щука. Спектакль от команды, состовляющей расписание
+					!strings.Contains(class.Title, "/9") && !strings.Contains(class.Title, "/11") {
+					classesHack = append(classesHack, class)
+				} else {
+					if strings.Contains(class.Title,
+						strings.ReplaceAll(strings.ReplaceAll(name, "-9", ""), "-11", "")) {
+						classesHack = append(classesHack, class)
+					}
+				}
+			}
+
+		}
+
+		ret = append(ret, &model.Timetable{
+			Institution: p.GetInstitution(),
+			GroupName:   name,
+			Faculty:     group.faculty,
+			Date:        date,
+			Activity:    activity,
+			Classes:     classesHack,
+		})
 	}
+
+	return nil, ret
 }
 
 // Иногда в расписание засовывают ссылку на занятие в зуме...
-var externalLinkRE = regexp.MustCompile("(?i)(https?://[-a-zA-Z0-9+&@#/%?=~_|!:,.;]*[-a-zA-Z0-9+&@#/%=~_|])")
+var externalLinkRE = regexp.MustCompile("(?i)(https?://[-a-zA-Zа-яё0-9+&@#/%?=~_|!:,{}.;]*[-a-zA-Z0-9+&@#/%=~_|])")
 
 // Разобъем вторую строку по переносам строки и пройдемся по ним
 func splitSubgroups(line string) (subgroups []string) {
-	var secondSubLineSplited = strings.Split(line, "\n")
-	for lineIndex := 0; lineIndex < len(secondSubLineSplited); lineIndex++ {
+	var subLineSplited []string
+	for _, s := range strings.Split(line, "\n") {
+		if len(s) > 0 {
+			subLineSplited = append(subLineSplited, s)
+		}
+	}
+	for lineIndex := 0; lineIndex < len(subLineSplited); lineIndex++ {
 		// Уберём ссылку из подстроки
-		cleaned := externalLinkRE.ReplaceAllString(secondSubLineSplited[lineIndex], "")
+		cleaned := externalLinkRE.ReplaceAllString(subLineSplited[lineIndex], "")
 		// Если это первая подстрока, либо в ней есть /
 		if lineIndex == 0 || strings.Contains(cleaned, "/") {
 			// Засунем в subgroups подгруппу
-			subgroups = append(subgroups, secondSubLineSplited[lineIndex])
+			subgroups = append(subgroups, subLineSplited[lineIndex])
 		} else {
 			// Иначе подгрупп нет (одна)
-			subgroups = []string{strings.Join(secondSubLineSplited, " ")}
+			subgroups = []string{strings.Join(subLineSplited, " ")}
 			break
 		}
 	}
@@ -368,12 +393,50 @@ func isLecture(firstLine, secondLine string) bool {
 		campusName(secondLine) != emptyField
 }
 
+// Я скоро заебусь это поддерживать блять. А сейчас только 3 сентября нахуй. Допереворачивался календарь.
+var anotherOneCollegeDirtyHack = regexp.MustCompile("^(.*) ([А-Яё][а-яё]+ +[А-ЯЁ][а-яё]+ +[А-ЯЁ][а-яё]+.*)$")
+
+func resolveSubgroups(firstLineSplited, secondLineSplited []string, line int) [][]string {
+	// Получим грубо говоря "нормальные" firstLine и secondLine
+	firstSubLineRaw := strings.TrimSpace(utils.GetOrString(firstLineSplited, line, ""))
+	secondSubLineRaw := strings.TrimSpace(utils.GetOrString(secondLineSplited, line, ""))
+	if secondSubLineRaw == "" && line > 0 {
+		secondSubLineRaw = strings.TrimSpace(utils.GetOrString(secondLineSplited, line-1, ""))
+	}
+
+	fSubgroups := splitSubgroups(firstSubLineRaw)
+	sSubgroups := splitSubgroups(secondSubLineRaw)
+	// college be like
+	// Иностранный язык 2-ФИН (9)Б Пиксендеева Виктория Геннадьевна,  ауд., ул.Егорова, 16                                                         //  Иностранный язык 2-ФИН(9)Д+ 1-ФИН(11) Бажанская Инна Валентиновна, ауд. ,
+	if len(fSubgroups) == 1 && len(sSubgroups) == 0 {
+		if anotherOneCollegeDirtyHack.MatchString(fSubgroups[0]) {
+			groups := anotherOneCollegeDirtyHack.FindStringSubmatch(fSubgroups[0])
+			fSubgroups = []string{groups[1]}
+			sSubgroups = []string{groups[2]}
+		}
+	}
+
+	subgroups := make([][]string, (int)(math.Max(float64(len(fSubgroups)), float64(len(sSubgroups)))))
+	for i := 0; i < len(subgroups); i++ {
+		subgroups[i] = make([]string, 2)
+
+		subgroups[i][0] = strings.TrimSpace(utils.GetOrString(fSubgroups, i, ""))
+		subgroups[i][1] = strings.TrimSpace(utils.GetOrString(sSubgroups, i, ""))
+	}
+
+	if len(subgroups) > 1 {
+		fmt.Println(subgroups)
+	}
+
+	return subgroups
+}
+
 // Нужно разбить последнюю строчку иногда по / (п/г и ссылки не подходят)
 var subgroupBypassRE = regexp.MustCompile("(?i)([^п]|^https?:/)/([ ^г])?")
 
 // Разобъем подстроку по /
 func splitLine(line string) (spliced []string) {
-	for _, tmp := range subgroupBypassRE.Split(line, 2) {
+	for _, tmp := range splitExcept(line, subgroupBypassRE, externalLinkRE) {
 		tmp = strings.Trim(tmp, " /")
 		if len(tmp) > 0 {
 			spliced = append(spliced, tmp)
@@ -459,7 +522,9 @@ func campusName(name string) string {
 	if practiceRE.MatchString(name) {
 		return emptyField
 	}
-
+	if externalLinkRE.MatchString(name) {
+		return name
+	}
 	var groups = numberRE.FindAllString(name, -1)
 	var ret = name
 	for i, auditorium := range groups {
@@ -493,6 +558,6 @@ func getExcept(groups []string, i int) (sb string) {
 // Модель для общения
 type currentGroup struct {
 	groupNames []string
-	faculty   string
-	sh        *xlsx.Sheet
+	faculty    string
+	sh         *xlsx.Sheet
 }

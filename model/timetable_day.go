@@ -5,7 +5,7 @@ import "time"
 // Timetable модель одного учебного дня
 type Timetable struct {
 	Institution string    `json:"institution"` //Образовательное учреждение, к которой относится расписание
-	GroupNames  []string  `json:"group"`       //Название групп
+	GroupName   string    `json:"group"`       //Название групп
 	Faculty     string    `json:"faculty"`     //Факультет
 	Date        time.Time `json:"date"`        //День, к которому Timetable относится
 	Activity    string    `json:"activity"`    //Какое-то задание дня (например, собрание, субботник, день самостоятельных работ, etc)
