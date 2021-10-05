@@ -10,12 +10,12 @@ package masu
 //UPD: Это не я виноват, виноват отдел, составляющий расписание T_T
 
 import (
-	"fmt"
 	"github.com/notaneet/rasp51/model"
 	"github.com/notaneet/rasp51/utils"
 	"github.com/tealeg/xlsx/v3"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,6 +50,7 @@ func (p *_MASUMurmanskPlugin) parseWB(wb *xlsx.File, faculty string) error {
 		}
 
 		group := currentGroup{
+			rawNames:  sh.Name,
 			groupNames: name,
 			faculty:    faculty,
 			sh:         sh,
@@ -77,9 +78,17 @@ func (p *_MASUMurmanskPlugin) parseSH(group currentGroup) (error error, days map
 			return nil, days
 		}
 	}
+	if len(group.groupNames) == 0 {
+		return nil, days
+	}
+
+	offset := 1
+	if cell, _ := group.sh.Cell(startRow - offset, startColumn); !cell.IsTime() {
+		offset = 0
+	}
 
 	for column := startColumn - 1; column < group.sh.MaxCol; column += dayWidth {
-		for row := startRow - 1; row < group.sh.MaxRow; row += maxClasses*classLength + 1 {
+		for row := startRow - offset; row < group.sh.MaxRow; row += maxClasses*classLength + 1 {
 			// Получим клетку, где по идее должна быть дата и если там нет клетки, либо там не дата, то идём ко след. дню
 			dateCell, err := group.sh.Cell(row, column+1)
 			if err != nil || !dateCell.IsTime() {
@@ -113,20 +122,27 @@ func (p *_MASUMurmanskPlugin) parseSH(group currentGroup) (error error, days map
 }
 
 //Почему в стд нет сплита с оффсетом, либо хотя-бы регулярок последней версии
-func splitExcept(str string, separator, excepting *regexp.Regexp) (ret []string) {
-	cleaned := excepting.ReplaceAllString(str, "<ugly_hack>")
+func splitExcept(str string, separator *regexp.Regexp, excepting... *regexp.Regexp) (ret []string) {
+	cleaned := str
+	for i, r := range excepting {
+		cleaned = r.ReplaceAllString(cleaned, "<ugly_hack_" + strconv.Itoa(i) + ">")
+	}
 	for _, s := range separator.Split(cleaned, -1) {
-		ret = append(ret, strings.Replace(s, "<ugly_hack>", excepting.FindString(str), -1))
+		readyToProd := s
+		for i, r := range excepting {
+			readyToProd = strings.Replace(readyToProd, "<ugly_hack_" + strconv.Itoa(i) + ">", r.FindString(str), -1)
+		}
+		ret = append(ret, readyToProd)
 	}
 	return
 }
 
 //Иногда у разных подгрупп разные пары в одно и тоже время (разделяется обычно с помощью //)
 var subgroupSepartor = regexp.MustCompile("(?i)//")
-
+var anotherOneCollegeZalupaHackEbalVRotNahui = regexp.MustCompile("(//\\t+([А-Яё][а-яё]+ +[А-ЯЁ][а-яё]+ +[А-ЯЁ][а-яё]+)(.*))")
 //^ выше
 func splitOnSubgroups(str string) []string {
-	return splitExcept(str, subgroupSepartor, externalLinkRE)
+	return splitExcept(str, subgroupSepartor, externalLinkRE, anotherOneCollegeZalupaHackEbalVRotNahui)
 }
 
 //activity, где время не нужно
@@ -357,6 +373,7 @@ func (p *_MASUMurmanskPlugin) parseDay(group currentGroup, column, row int, date
 // Иногда в расписание засовывают ссылку на занятие в зуме...
 var externalLinkRE = regexp.MustCompile("(?i)(https?://[-a-zA-Zа-яё0-9+&@#/%?=~_|!:,{}.;]*[-a-zA-Z0-9+&@#/%=~_|])")
 
+var collegeAnotherOneHackUbeyteMenyaPliz = regexp.MustCompile("[0-9]{3}/[0-9]{3}")
 // Разобъем вторую строку по переносам строки и пройдемся по ним
 func splitSubgroups(line string) (subgroups []string) {
 	var subLineSplited []string
@@ -368,6 +385,7 @@ func splitSubgroups(line string) (subgroups []string) {
 	for lineIndex := 0; lineIndex < len(subLineSplited); lineIndex++ {
 		// Уберём ссылку из подстроки
 		cleaned := externalLinkRE.ReplaceAllString(subLineSplited[lineIndex], "")
+		cleaned = collegeAnotherOneHackUbeyteMenyaPliz.ReplaceAllString(cleaned, "")
 		// Если это первая подстрока, либо в ней есть /
 		if lineIndex == 0 || strings.Contains(cleaned, "/") {
 			// Засунем в subgroups подгруппу
@@ -394,7 +412,7 @@ func isLecture(firstLine, secondLine string) bool {
 }
 
 // Я скоро заебусь это поддерживать блять. А сейчас только 3 сентября нахуй. Допереворачивался календарь.
-var anotherOneCollegeDirtyHack = regexp.MustCompile("^(.*) ([А-Яё][а-яё]+ +[А-ЯЁ][а-яё]+ +[А-ЯЁ][а-яё]+.*)$")
+var anotherOneCollegeDirtyHack = regexp.MustCompile("^(.*) ([А-Яё][а-яё]+ +[А-ЯЁ][а-яё]+ +[А-ЯЁ][а-яё]+)(.*)$")
 
 func resolveSubgroups(firstLineSplited, secondLineSplited []string, line int) [][]string {
 	// Получим грубо говоря "нормальные" firstLine и secondLine
@@ -412,7 +430,7 @@ func resolveSubgroups(firstLineSplited, secondLineSplited []string, line int) []
 		if anotherOneCollegeDirtyHack.MatchString(fSubgroups[0]) {
 			groups := anotherOneCollegeDirtyHack.FindStringSubmatch(fSubgroups[0])
 			fSubgroups = []string{groups[1]}
-			sSubgroups = []string{groups[2]}
+			sSubgroups = []string{groups[2] + "/" + groups[3]}
 		}
 	}
 
@@ -425,7 +443,7 @@ func resolveSubgroups(firstLineSplited, secondLineSplited []string, line int) []
 	}
 
 	if len(subgroups) > 1 {
-		fmt.Println(subgroups)
+		//fmt.Println(subgroups)
 	}
 
 	return subgroups
@@ -436,7 +454,7 @@ var subgroupBypassRE = regexp.MustCompile("(?i)([^п]|^https?:/)/([ ^г])?")
 
 // Разобъем подстроку по /
 func splitLine(line string) (spliced []string) {
-	for _, tmp := range splitExcept(line, subgroupBypassRE, externalLinkRE) {
+	for _, tmp := range splitExcept(line, subgroupBypassRE, externalLinkRE, collegeAnotherOneHackUbeyteMenyaPliz) {
 		tmp = strings.Trim(tmp, " /")
 		if len(tmp) > 0 {
 			spliced = append(spliced, tmp)
@@ -481,6 +499,9 @@ var lecturerNameInsaneRE = regexp.MustCompile("(?i)([а-яё]+) ([а-яё]\\.[а
 
 // Получить имя преподавателя в нужном формате по name
 func lecturerName(name string) string {
+	if numberRE.MatchString(name) {
+		return emptyField
+	}
 	ret := name
 
 	var k []string
@@ -513,6 +534,7 @@ func lecturerName(name string) string {
 
 // Все числа из строки, чтобы можно было получить аудиторию или корпус (это хак, но иначне никак)
 var numberRE = regexp.MustCompile("(\\d+)")
+var auditoriumRE = regexp.MustCompile("(\\d+|актовый зал|спортивный зал|спорт\\. ?зал)")
 
 // При учебной практике, во второй строчке прячутся невидимые даты. Поможем же Даше и Башмачку их найти
 var practiceRE = regexp.MustCompile("\\d{2}\\.\\d{2}(\\.\\d{2,4})?[ ]*-[ ]*\\d{2}\\.\\d{2}(\\.\\d{2,4})?")
@@ -525,7 +547,7 @@ func campusName(name string) string {
 	if externalLinkRE.MatchString(name) {
 		return name
 	}
-	var groups = numberRE.FindAllString(name, -1)
+	var groups = auditoriumRE.FindAllString(name, -1)
 	var ret = name
 	for i, auditorium := range groups {
 		if auditorium == "57" {
@@ -557,6 +579,7 @@ func getExcept(groups []string, i int) (sb string) {
 
 // Модель для общения
 type currentGroup struct {
+	rawNames string
 	groupNames []string
 	faculty    string
 	sh         *xlsx.Sheet

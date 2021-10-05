@@ -1,6 +1,7 @@
 package masu
 
 import (
+	"fmt"
 	"github.com/gocolly/colly"
 	"github.com/tealeg/xlsx/v3"
 	"io/ioutil"
@@ -17,7 +18,7 @@ func (p *_MASUMurmanskPlugin) scrap() error {
 	var err error
 	c.OnHTML(facultySelector, func(e *colly.HTMLElement) {
 		if _err := p.facultyScrapper(e); _err != nil {
-			err = _err
+			fmt.Println(e.Attr("href"))
 		}
 	})
 
@@ -41,7 +42,7 @@ func (p *_MASUMurmanskPlugin) facultyScrapper(e *colly.HTMLElement) error {
 	c := colly.NewCollector(colly.Async(true))
 	var err error = nil
 	c.OnHTML(timetableSelector, func(e *colly.HTMLElement) {
-		err = p.timetableScrapper(e, faculty)
+		p.timetableScrapper(e, faculty)
 	})
 	if _err := c.Visit(e.Request.AbsoluteURL(link)); _err != nil {
 		return _err
